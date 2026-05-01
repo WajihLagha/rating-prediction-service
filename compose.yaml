@@ -1,0 +1,9 @@
+services:
+  nlp-rating-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nlp-rating-service
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

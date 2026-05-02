@@ -37,6 +37,10 @@ class RatingStatusResponse(BaseModel):
 
     status: str
     model_loaded: bool
+    model_loading: bool = False
     model_source: str | None = None
+    model_load_error: str | None = None
     arabic_model_loaded: bool = False
+    arabic_model_loading: bool = False
     arabic_model_source: str | None = None
+    arabic_model_load_error: str | None = None

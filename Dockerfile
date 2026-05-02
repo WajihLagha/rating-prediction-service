@@ -16,9 +16,7 @@ RUN python -c "from transformers import AutoModelForSequenceClassification, Auto
 RUN python -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; AutoTokenizer.from_pretrained('mohres/Arabic-Book-Review-Sentiment-Assessment', cache_dir='/opt/huggingface'); AutoModelForSequenceClassification.from_pretrained('mohres/Arabic-Book-Review-Sentiment-Assessment', cache_dir='/opt/huggingface')"
 
 COPY app ./app
-COPY model ./model
-COPY model_ar ./model_ar
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["gunicorn", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "600", "-b", "0.0.0.0:8000", "app.main:app"]

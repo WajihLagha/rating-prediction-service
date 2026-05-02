@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from contextlib import suppress
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, status
@@ -19,6 +20,30 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+async def _load_predictor_state(
+    app: FastAPI,
+    *,
+    predictor_attr: str,
+    state_prefix: str,
+    log_label: str,
+) -> None:
+    predictor: RatingPredictor = getattr(app.state, predictor_attr)
+
+    setattr(app.state, f"{state_prefix}_loading", True)
+    setattr(app.state, f"{state_prefix}_load_error", None)
+
+    try:
+        await asyncio.to_thread(predictor.load)
+        setattr(app.state, f"{state_prefix}_loaded", predictor.is_loaded)
+        logger.info("%s model loaded from %s", log_label, predictor.model_source)
+    except Exception as exc:  # pragma: no cover - startup fallback path
+        setattr(app.state, f"{state_prefix}_loaded", False)
+        setattr(app.state, f"{state_prefix}_load_error", str(exc))
+        logger.exception("Failed to load %s model", log_label)
+    finally:
+        setattr(app.state, f"{state_prefix}_loading", False)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     predictor = build_primary_predictor(settings)
@@ -26,29 +51,36 @@ async def lifespan(app: FastAPI):
     app.state.predictor = predictor
     app.state.arabic_predictor = arabic_predictor
     app.state.model_loaded = False
-    app.state.arabic_model_loaded = False
+    app.state.model_loading = True
     app.state.model_load_error = None
+    app.state.arabic_model_loaded = False
+    app.state.arabic_model_loading = True
     app.state.arabic_model_load_error = None
 
-    try:
-        await asyncio.to_thread(predictor.load)
-        app.state.model_loaded = predictor.is_loaded
-        logger.info("Model loaded from %s", predictor.model_source)
-    except Exception as exc:  # pragma: no cover - startup fallback path
-        app.state.model_loaded = False
-        app.state.model_load_error = str(exc)
-        logger.exception("Failed to load model")
-
-    try:
-        await asyncio.to_thread(arabic_predictor.load)
-        app.state.arabic_model_loaded = arabic_predictor.is_loaded
-        logger.info("Arabic model loaded from %s", arabic_predictor.model_source)
-    except Exception as exc:  # pragma: no cover - startup fallback path
-        app.state.arabic_model_loaded = False
-        app.state.arabic_model_load_error = str(exc)
-        logger.exception("Failed to load Arabic model")
+    primary_task = asyncio.create_task(
+        _load_predictor_state(
+            app,
+            predictor_attr="predictor",
+            state_prefix="model",
+            log_label="primary",
+        )
+    )
+    arabic_task = asyncio.create_task(
+        _load_predictor_state(
+            app,
+            predictor_attr="arabic_predictor",
+            state_prefix="arabic_model",
+            log_label="arabic",
+        )
+    )
 
     yield
+
+    for task in (primary_task, arabic_task):
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 app = FastAPI(title=settings.service_name, lifespan=lifespan)
@@ -63,21 +95,49 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+async def root() -> dict[str, object]:
+    return {
+        "service": settings.service_name,
+        "docs_url": "/docs",
+        "health_url": "/health",
+        "predict_url": "/predict",
+        "predict_ar_url": "/predict-ar",
+    }
+
+
 @app.get("/health", response_model=RatingStatusResponse)
 async def rating_status(request: Request) -> RatingStatusResponse:
     predictor: RatingPredictor | None = getattr(request.app.state, "predictor", None)
+    model_loaded = bool(request.app.state.model_loaded)
+    model_loading = bool(getattr(request.app.state, "model_loading", False))
+    arabic_model_loaded = bool(request.app.state.arabic_model_loaded)
+    arabic_model_loading = bool(
+        getattr(request.app.state, "arabic_model_loading", False)
+    )
+
     return RatingStatusResponse(
         status=(
             "ok"
-            if request.app.state.model_loaded and request.app.state.arabic_model_loaded
+            if model_loaded and arabic_model_loaded
+            else "loading"
+            if model_loading or arabic_model_loading
             else "degraded"
         ),
-        model_loaded=bool(request.app.state.model_loaded),
+        model_loaded=model_loaded,
+        model_loading=model_loading,
         model_source=getattr(predictor, "model_source", None),
-        arabic_model_loaded=bool(request.app.state.arabic_model_loaded),
+        model_load_error=getattr(request.app.state, "model_load_error", None),
+        arabic_model_loaded=arabic_model_loaded,
+        arabic_model_loading=arabic_model_loading,
         arabic_model_source=getattr(
             getattr(request.app.state, "arabic_predictor", None),
             "model_source",
+            None,
+        ),
+        arabic_model_load_error=getattr(
+            request.app.state,
+            "arabic_model_load_error",
             None,
         ),
     )
@@ -89,7 +149,8 @@ async def predict(payload: PredictionRequest, request: Request) -> PredictionRes
     if predictor is None or not predictor.is_loaded:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="model is not loaded",
+            detail=getattr(request.app.state, "model_load_error", None)
+            or "model is still loading",
         )
 
     try:
@@ -132,7 +193,8 @@ async def predict_arabic(
     if predictor is None or not predictor.is_loaded:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="arabic model is not loaded",
+            detail=getattr(request.app.state, "arabic_model_load_error", None)
+            or "arabic model is still loading",
         )
 
     try:

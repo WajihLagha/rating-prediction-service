@@ -7,11 +7,3 @@ __pycache__/
 venv/
 .env
 .DS_Store
-
-# Keep model folders, but do not commit large trained weights by default.
-model/*
-!model/.gitkeep
-!model/README.md
-model_ar/*
-!model_ar/.gitkeep
-!model_ar/README.md

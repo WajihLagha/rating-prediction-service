@@ -1,5 +1,4 @@
 from functools import lru_cache
-from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,12 +13,9 @@ class Settings(BaseSettings):
 
     service_name: str = "nlp-rating-service"
     hf_model_name: str = "nhull/distilbert-sentiment-model"
-    model_path: Path = Path("model")
     arabic_hf_model_name: str = "mohres/Arabic-Book-Review-Sentiment-Assessment"
-    arabic_model_path: Path = Path("model_ar")
     expected_num_labels: int = 5
     arabic_expected_num_labels: int = 5
-    allow_untrained_base_model: bool = False
     max_review_chars: int = 1000
     max_model_tokens: int = 512
     forward_timeout_seconds: float = 10.0

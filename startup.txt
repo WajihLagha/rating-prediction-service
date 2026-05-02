@@ -1,1 +1,1 @@
-gunicorn -w 2 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 app.main:app
+gunicorn -w 1 -k uvicorn.workers.UvicornWorker --timeout 600 -b 0.0.0.0:${PORT:-8000} app.main:app

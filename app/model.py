@@ -1,8 +1,13 @@
-import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
 from app.config import Settings
-from app.preprocessor import preprocess_review
+from app.preprocessor import clean_text
+
+
+class HuggingFaceInferenceError(RuntimeError):
+    """Raised when Hugging Face inference fails."""
+
+
+class HuggingFaceServiceUnavailable(HuggingFaceInferenceError):
+    """Raised when the remote model is still cold-starting or unavailable."""
 
 
 class RatingPredictor:
@@ -12,70 +17,135 @@ class RatingPredictor:
         *,
         hf_model_name: str,
         expected_num_labels: int,
+        label_aliases: dict[str, int],
     ) -> None:
         self.settings = settings
         self.hf_model_name = hf_model_name
         self.expected_num_labels = expected_num_labels
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = None
-        self.model = None
-        self.model_source: str | None = None
+        self.label_aliases = label_aliases
 
     @property
-    def is_loaded(self) -> bool:
-        return self.tokenizer is not None and self.model is not None
+    def is_configured(self) -> bool:
+        return bool(self.settings.hf_token)
 
-    def load(self) -> None:
-        source = self.hf_model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(source)
-        self.model = AutoModelForSequenceClassification.from_pretrained(source)
-        self._validate_loaded_model(source)
-        self.model.to(self.device)
-        self.model.eval()
-        self.model_source = str(source)
+    @property
+    def model_source(self) -> str:
+        return f"{self.settings.hf_inference_base_url.rstrip('/')}/{self.hf_model_name}"
 
-    def _validate_loaded_model(self, source: str) -> None:
-        num_labels = getattr(self.model.config, "num_labels", None)
-        if num_labels != self.expected_num_labels:
-            raise RuntimeError(
-                f"Loaded model '{source}' exposes {num_labels} labels, "
-                f"expected {self.expected_num_labels}."
-            )
+    async def predict(
+        self,
+        review: str,
+        *,
+        client,
+    ) -> dict[str, object]:
+        if not self.is_configured:
+            raise HuggingFaceInferenceError("Hugging Face token is not configured")
 
-    def predict(self, review: str) -> dict[str, object]:
-        if not self.is_loaded:
-            raise RuntimeError("model is not loaded")
-
-        prepared_review = preprocess_review(
-            review=review,
-            tokenizer=self.tokenizer,
-            max_tokens=self.settings.max_model_tokens,
+        prepared_review = clean_text(review)
+        response = await client.post(
+            self.model_source,
+            headers={
+                "Authorization": f"Bearer {self.settings.hf_token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "inputs": prepared_review,
+                "parameters": {
+                    "top_k": self.expected_num_labels,
+                    "function_to_apply": "softmax",
+                },
+            },
         )
-        encoded = self.tokenizer(
-            prepared_review,
-            return_tensors="pt",
-            truncation=True,
-            max_length=self.settings.max_model_tokens,
-            padding=False,
-        )
-        encoded = {key: value.to(self.device) for key, value in encoded.items()}
 
-        with torch.no_grad():
-            logits = self.model(**encoded).logits
-            probabilities = torch.softmax(logits, dim=-1).squeeze(0)
-
-        rating_index = int(torch.argmax(probabilities).item())
-        confidence = float(probabilities[rating_index].item())
-        label_scores = {
-            str(label + 1): float(score)
-            for label, score in enumerate(probabilities.tolist())
-        }
+        payload = self._parse_payload(response)
+        scores = self._normalize_scores(payload)
+        rating = max(scores, key=scores.get)
+        confidence = float(scores[rating])
 
         return {
-            "rating": rating_index + 1,
+            "rating": int(rating),
             "confidence": confidence,
-            "label_scores": label_scores,
+            "label_scores": scores,
         }
+
+    def _parse_payload(self, response) -> object:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HuggingFaceInferenceError("Inference API returned invalid JSON") from exc
+
+        if response.status_code == 503:
+            detail = self._extract_error_message(payload) or "Model is warming up"
+            raise HuggingFaceServiceUnavailable(detail)
+
+        if response.status_code >= 400:
+            detail = self._extract_error_message(payload) or response.text
+            raise HuggingFaceInferenceError(
+                f"Inference API request failed with status {response.status_code}: {detail}"
+            )
+
+        if isinstance(payload, dict) and payload.get("error"):
+            raise HuggingFaceInferenceError(str(payload["error"]))
+
+        return payload
+
+    def _normalize_scores(self, payload: object) -> dict[str, float]:
+        rows = payload
+        if isinstance(rows, list) and rows and isinstance(rows[0], list):
+            rows = rows[0]
+
+        if not isinstance(rows, list):
+            raise HuggingFaceInferenceError(
+                "Inference API returned an unexpected response shape"
+            )
+
+        label_scores = {str(index): 0.0 for index in range(1, self.expected_num_labels + 1)}
+
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+
+            label = item.get("label")
+            score = item.get("score")
+            if label is None or score is None:
+                continue
+
+            rating = self._map_label_to_rating(str(label))
+            label_scores[str(rating)] = float(score)
+
+        if not any(label_scores.values()):
+            raise HuggingFaceInferenceError(
+                "Inference API returned no usable label scores"
+            )
+
+        return label_scores
+
+    def _map_label_to_rating(self, label: str) -> int:
+        normalized = " ".join(
+            label.strip().lower().replace("-", " ").replace("_", " ").split()
+        )
+
+        if normalized in self.label_aliases:
+            return self.label_aliases[normalized]
+
+        numeric_suffix = normalized.removeprefix("label ").strip()
+        for candidate in (normalized, numeric_suffix):
+            if candidate.isdigit():
+                value = int(candidate)
+                if 1 <= value <= self.expected_num_labels:
+                    return value
+                if 0 <= value < self.expected_num_labels:
+                    return value + 1
+
+        raise HuggingFaceInferenceError(f"Unsupported label returned by model: {label}")
+
+    @staticmethod
+    def _extract_error_message(payload: object) -> str | None:
+        if isinstance(payload, dict):
+            message = payload.get("error")
+            if isinstance(message, str):
+                return message
+        return None
 
 
 def build_primary_predictor(settings: Settings) -> RatingPredictor:
@@ -83,6 +153,18 @@ def build_primary_predictor(settings: Settings) -> RatingPredictor:
         settings,
         hf_model_name=settings.hf_model_name,
         expected_num_labels=settings.expected_num_labels,
+        label_aliases={
+            "1": 1,
+            "2": 2,
+            "3": 3,
+            "4": 4,
+            "5": 5,
+            "label 0": 1,
+            "label 1": 2,
+            "label 2": 3,
+            "label 3": 4,
+            "label 4": 5,
+        },
     )
 
 
@@ -91,4 +173,21 @@ def build_arabic_predictor(settings: Settings) -> RatingPredictor:
         settings,
         hf_model_name=settings.arabic_hf_model_name,
         expected_num_labels=settings.arabic_expected_num_labels,
+        label_aliases={
+            "0": 1,
+            "1": 2,
+            "2": 3,
+            "3": 4,
+            "4": 5,
+            "label 0": 1,
+            "label 1": 2,
+            "label 2": 3,
+            "label 3": 4,
+            "label 4": 5,
+            "poor": 1,
+            "fair": 2,
+            "good": 3,
+            "very good": 4,
+            "excellent": 5,
+        },
     )

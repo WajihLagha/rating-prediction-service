@@ -12,12 +12,14 @@ class Settings(BaseSettings):
     )
 
     service_name: str = "nlp-rating-service"
+    hf_token: str | None = Field(default=None, repr=False)
+    hf_inference_base_url: str = "https://router.huggingface.co/hf-inference/models"
     hf_model_name: str = "nhull/distilbert-sentiment-model"
     arabic_hf_model_name: str = "mohres/Arabic-Book-Review-Sentiment-Assessment"
+    inference_timeout_seconds: float = 60.0
     expected_num_labels: int = 5
     arabic_expected_num_labels: int = 5
     max_review_chars: int = 1000
-    max_model_tokens: int = 512
     forward_timeout_seconds: float = 10.0
     low_confidence_threshold: float = 0.0
     cors_allow_origins: list[str] = Field(

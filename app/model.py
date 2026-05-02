@@ -1,3 +1,5 @@
+import httpx
+
 from app.config import Settings
 from app.preprocessor import clean_text
 
@@ -30,34 +32,20 @@ class RatingPredictor:
 
     @property
     def model_source(self) -> str:
-        return f"{self.settings.hf_inference_base_url.rstrip('/')}/{self.hf_model_name}"
+        base_url = self.settings.hf_inference_api_base_url.rstrip("/")
+        return f"{base_url}/{self.hf_model_name}"
 
     async def predict(
         self,
         review: str,
         *,
-        client,
+        client: httpx.AsyncClient,
     ) -> dict[str, object]:
         if not self.is_configured:
             raise HuggingFaceInferenceError("Hugging Face token is not configured")
 
         prepared_review = clean_text(review)
-        response = await client.post(
-            self.model_source,
-            headers={
-                "Authorization": f"Bearer {self.settings.hf_token}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "inputs": prepared_review,
-                "parameters": {
-                    "top_k": self.expected_num_labels,
-                    "function_to_apply": "softmax",
-                },
-            },
-        )
-
-        payload = self._parse_payload(response)
+        payload = await self._request_scores(client, prepared_review)
         scores = self._normalize_scores(payload)
         rating = max(scores, key=scores.get)
         confidence = float(scores[rating])
@@ -68,7 +56,34 @@ class RatingPredictor:
             "label_scores": scores,
         }
 
-    def _parse_payload(self, response) -> object:
+    async def _request_scores(
+        self,
+        client: httpx.AsyncClient,
+        prepared_review: str,
+    ) -> object:
+        try:
+            response = await client.post(
+                self.model_source,
+                headers={
+                    "Authorization": f"Bearer {self.settings.hf_token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "inputs": prepared_review,
+                    "parameters": {
+                        "top_k": self.expected_num_labels,
+                        "function_to_apply": "softmax",
+                    },
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise HuggingFaceServiceUnavailable("Model is warming up") from exc
+        except httpx.HTTPError as exc:
+            raise HuggingFaceInferenceError(f"Inference API request failed: {exc}") from exc
+
+        return self._parse_payload(response)
+
+    def _parse_payload(self, response: httpx.Response) -> object:
         try:
             payload = response.json()
         except ValueError as exc:
@@ -102,11 +117,12 @@ class RatingPredictor:
         label_scores = {str(index): 0.0 for index in range(1, self.expected_num_labels + 1)}
 
         for item in rows:
-            if not isinstance(item, dict):
-                continue
-
-            label = item.get("label")
-            score = item.get("score")
+            if isinstance(item, dict):
+                label = item.get("label")
+                score = item.get("score")
+            else:
+                label = getattr(item, "label", None)
+                score = getattr(item, "score", None)
             if label is None or score is None:
                 continue
 
@@ -142,7 +158,7 @@ class RatingPredictor:
     @staticmethod
     def _extract_error_message(payload: object) -> str | None:
         if isinstance(payload, dict):
-            message = payload.get("error")
+            message = payload.get("error") or payload.get("message")
             if isinstance(message, str):
                 return message
         return None
@@ -159,6 +175,11 @@ def build_primary_predictor(settings: Settings) -> RatingPredictor:
             "3": 3,
             "4": 4,
             "5": 5,
+            "very negative": 1,
+            "negative": 2,
+            "neutral": 3,
+            "positive": 4,
+            "very positive": 5,
             "label 0": 1,
             "label 1": 2,
             "label 2": 3,
@@ -179,6 +200,11 @@ def build_arabic_predictor(settings: Settings) -> RatingPredictor:
             "2": 3,
             "3": 4,
             "4": 5,
+            "very negative": 1,
+            "negative": 2,
+            "neutral": 3,
+            "positive": 4,
+            "very positive": 5,
             "label 0": 1,
             "label 1": 2,
             "label 2": 3,

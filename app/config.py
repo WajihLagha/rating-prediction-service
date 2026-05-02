@@ -13,9 +13,9 @@ class Settings(BaseSettings):
 
     service_name: str = "nlp-rating-service"
     hf_token: str | None = Field(default=None, repr=False)
-    hf_inference_base_url: str = "https://router.huggingface.co/hf-inference/models"
-    hf_model_name: str = "nhull/distilbert-sentiment-model"
-    arabic_hf_model_name: str = "mohres/Arabic-Book-Review-Sentiment-Assessment"
+    hf_inference_api_base_url: str = "https://router.huggingface.co/hf-inference/models"
+    hf_model_name: str = "tabularisai/multilingual-sentiment-analysis"
+    arabic_hf_model_name: str = "tabularisai/multilingual-sentiment-analysis"
     inference_timeout_seconds: float = 60.0
     expected_num_labels: int = 5
     arabic_expected_num_labels: int = 5

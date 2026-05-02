@@ -4,8 +4,8 @@
 
 ## Architecture
 
-- `POST /predict` sends English review text to `nhull/distilbert-sentiment-model`
-- `POST /predict-ar` sends Arabic review text to `mohres/Arabic-Book-Review-Sentiment-Assessment`
+- `POST /predict` sends review text to `tabularisai/multilingual-sentiment-analysis`
+- `POST /predict-ar` sends review text to `tabularisai/multilingual-sentiment-analysis`
 - Hugging Face returns label scores
 - the service maps those labels into the shared `1..5` response format
 
@@ -22,8 +22,8 @@ NLP_RATING_HF_TOKEN=your-huggingface-token
 Optional overrides:
 
 ```env
-NLP_RATING_HF_MODEL_NAME=nhull/distilbert-sentiment-model
-NLP_RATING_ARABIC_HF_MODEL_NAME=mohres/Arabic-Book-Review-Sentiment-Assessment
+NLP_RATING_HF_MODEL_NAME=tabularisai/multilingual-sentiment-analysis
+NLP_RATING_ARABIC_HF_MODEL_NAME=tabularisai/multilingual-sentiment-analysis
 NLP_RATING_INFERENCE_TIMEOUT_SECONDS=60
 NLP_RATING_FORWARD_TIMEOUT_SECONDS=10
 ```
@@ -134,4 +134,5 @@ Health check path:
 
 - this project now depends on Hugging Face availability for inference
 - the first request may be slower if the hosted model is cold
+- the app uses a multilingual 5-class sentiment model and maps `Very Negative` to `1` through `Very Positive` to `5`
 - if Hugging Face returns a temporary `503`, the API surfaces that as a `503 Service Unavailable`

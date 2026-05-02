@@ -24,13 +24,19 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     app.state.predictor = build_primary_predictor(settings)
     app.state.arabic_predictor = build_arabic_predictor(settings)
-    app.state.http_client = httpx.AsyncClient(
-        timeout=settings.inference_timeout_seconds
+    app.state.forward_client = httpx.AsyncClient(
+        timeout=settings.forward_timeout_seconds,
+        trust_env=False,
+    )
+    app.state.inference_client = httpx.AsyncClient(
+        timeout=settings.inference_timeout_seconds,
+        trust_env=False,
     )
 
     yield
 
-    await app.state.http_client.aclose()
+    await app.state.forward_client.aclose()
+    await app.state.inference_client.aclose()
 
 
 app = FastAPI(title=settings.service_name, lifespan=lifespan)
@@ -99,7 +105,7 @@ async def predict(payload: PredictionRequest, request: Request) -> PredictionRes
     try:
         prediction = await predictor.predict(
             payload.review,
-            client=request.app.state.http_client,
+            client=request.app.state.inference_client,
         )
     except HuggingFaceServiceUnavailable as exc:
         raise HTTPException(
@@ -121,10 +127,10 @@ async def predict(payload: PredictionRequest, request: Request) -> PredictionRes
 
     if payload.forward_to is not None:
         try:
-            async with httpx.AsyncClient(
-                timeout=settings.forward_timeout_seconds
-            ) as client:
-                await client.post(str(payload.forward_to), json=prediction)
+            await request.app.state.forward_client.post(
+                str(payload.forward_to),
+                json=prediction,
+            )
         except httpx.HTTPError as exc:
             logger.exception("Forwarding prediction failed")
             raise HTTPException(
@@ -154,7 +160,7 @@ async def predict_arabic(
     try:
         prediction = await predictor.predict(
             payload.review,
-            client=request.app.state.http_client,
+            client=request.app.state.inference_client,
         )
     except HuggingFaceServiceUnavailable as exc:
         raise HTTPException(
@@ -176,10 +182,10 @@ async def predict_arabic(
 
     if payload.forward_to is not None:
         try:
-            async with httpx.AsyncClient(
-                timeout=settings.forward_timeout_seconds
-            ) as client:
-                await client.post(str(payload.forward_to), json=prediction)
+            await request.app.state.forward_client.post(
+                str(payload.forward_to),
+                json=prediction,
+            )
         except httpx.HTTPError as exc:
             logger.exception("Forwarding Arabic prediction failed")
             raise HTTPException(
